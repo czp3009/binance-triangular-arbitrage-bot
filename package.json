@@ -9,6 +9,7 @@
     "build:watch": "yarn tsc -w"
   },
   "dependencies": {
+    "bignumber.js": "^9.0.1",
     "binance-api-node": "^0.10.34",
     "node-global-proxy": "^1.0.1"
   },

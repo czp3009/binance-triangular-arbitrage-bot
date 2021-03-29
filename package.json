@@ -4,7 +4,9 @@
   "main": "index.js",
   "license": "MIT",
   "scripts": {
-    "start": "yarn tsc && node dist/Main.js"
+    "start": "node dist/Main.js",
+    "build": "yarn tsc",
+    "build:watch": "yarn tsc -w"
   },
   "dependencies": {
     "binance-api-node": "^0.10.34",

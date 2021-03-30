@@ -1,10 +1,17 @@
 {
   "api": {
-    "apiKey": "",
-    "apiSecret": "",
-    "httpBase": null
+    "apiKey": "ur1wxOeiZUY1gepIMUyLykPX83WOjzpwkWb9iXag3z8Dfet7inz6cUt20I3OwGcp",
+    "apiSecret": "722UQA16f58wSWZeAqwcXyFIRZUWXfpOg0P4zRGFkFTHcgXRx5zSo85Ua6dzWO8W",
+    "httpBase": "https://testnet.binance.vision"
   },
-  "quoteAssets": ["BTC","ETH","BNB","USDT","BUSD"],
+  "quoteAssets": ["BTC","ETH","BNB"],
+  "tradingPairFilter": {
+    "enable": true,
+    "blackList": [],
+    "quoteVolumeLimit": 1000,
+    "volumeLimit": 1000,
+    "tradeSpeedLimit": 10
+  },
   "investmentRatio": 0.5,
   "onlyProfitGreaterEqualThan": 0.004,
   "proxy": {

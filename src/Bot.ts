@@ -1,18 +1,22 @@
-import Binance, {DailyStatsResult} from "binance-api-node"
+import Binance, {DailyStatsResult, OrderSide} from "binance-api-node"
 import BigNumber from "bignumber.js";
+import {TradingPairFilter} from "./Config";
+import {getPair} from "./Utils";
 
 export class Bot {
     private readonly client: import("binance-api-node").Binance
     private readonly quoteAssets: string[]
+    private readonly tradingPairFilter: TradingPairFilter
     private readonly investmentRatio: BigNumber
     private readonly onlyProfitGreaterEqualThan: BigNumber
     private initialized: boolean = false
-    private chosenQuoteAssets: string[] = []
+    private chosenQuoteAssets: { asset: string, quantity: BigNumber }[] = []
     private availableTradingChains: TradingChain[] = []
 
     constructor(
         apiKey: string, apiSecret: string,
         quoteAssets: string[],
+        tradingPairFilter: TradingPairFilter,
         investmentRatio: BigNumber,
         onlyProfitGreaterEqualThan: BigNumber,
         httpBase?: string
@@ -23,6 +27,7 @@ export class Bot {
             httpBase
         })
         this.quoteAssets = quoteAssets
+        this.tradingPairFilter = tradingPairFilter
         this.investmentRatio = investmentRatio
         this.onlyProfitGreaterEqualThan = onlyProfitGreaterEqualThan
     }
@@ -37,10 +42,13 @@ export class Bot {
         freeAssets.forEach(it => {
             console.log(`${it.asset}: ${it.quantity}`)
         })
-        this.chosenQuoteAssets = freeAssets.filter(it => this.quoteAssets.includes(it.asset)).map(it => it.asset)
+        this.chosenQuoteAssets = freeAssets.filter(it => this.quoteAssets.includes(it.asset)).map(it => ({
+            asset: it.asset,
+            quantity: it.quantity
+        }))
         if (this.chosenQuoteAssets.length === 0) throw new Error("No quote asset is available")
         console.log("Chosen quote assets:")
-        console.log(this.chosenQuoteAssets.join(", "))
+        console.log(this.chosenQuoteAssets.map(it => it.asset).join(", "))
         console.log("Analyze trading pairs...")
         this.availableTradingChains = await this.analyzeTradingPairs()
         if (this.availableTradingChains.length === 0) throw new Error("No available trading chain")
@@ -54,10 +62,6 @@ export class Bot {
         //some price will be 0 on testnet
         const prices = await this.client.prices()
         const invalidPairs = Object.keys(prices).filter(it => new BigNumber(prices[it]).eq(new BigNumber(0)))
-
-        function getPair(asset: string, otherAsset: string, side: string) {
-            return side === "BUY" ? `${otherAsset}${asset}` : `${asset}${otherAsset}`
-        }
 
         function getPrice(asset: string, otherAsset: string, side: string) {
             return new BigNumber(prices[getPair(asset, otherAsset, side)])
@@ -82,6 +86,42 @@ export class Bot {
         }).sort((a, b) => b.profit.minus(a.profit).toNumber())
     }
 
+    async performOnce() {
+        const lucrativeTradingChains = await this.findOutLucrativeTradingChains()
+        if (lucrativeTradingChains.length === 0) {
+            console.log("No lucrative trading chains")
+            return
+        }
+        lucrativeTradingChains.slice(0, 5).forEach(it => {
+            console.log(`${it.initAssetQuantity} ${it.initAsset} -> ${it.firstAssetQuantity} ${it.firstAsset} -> ${it.secondAssetQuantity} ${it.secondAsset} -> ${it.finalInitAssetQuantity} ${it.initAsset} profit: ${it.profit.times(new BigNumber(100))}%`)
+        })
+        const lucrativeTradingChain = lucrativeTradingChains[0]
+        const {initAsset, firstAction, firstAsset, secondAction, secondAsset, lastAction} = lucrativeTradingChain
+        console.log(`Selected trading chain: ${initAsset} -> ${firstAsset} -> ${secondAsset} -> ${initAsset}`)
+        //send order
+        //first
+        const firstOrder = await this.client.order({
+            symbol: getPair(initAsset, firstAsset, firstAction),
+            side: firstAction,
+            quantity: this.chosenQuoteAssets.find(it => it.asset === initAsset)!.quantity.toString(),
+            type: "MARKET"
+        })
+        //second
+        const secondOrder = await this.client.order({
+            symbol: getPair(firstAsset, secondAsset, secondAction),
+            side: secondAction,
+            quantity: firstOrder.cummulativeQuoteQty,
+            type: "MARKET"
+        })
+        //third
+        const thirdOrder = await this.client.order({
+            symbol: getPair(secondAsset, initAsset, lastAction),
+            side: lastAction,
+            quantity: secondOrder.cummulativeQuoteQty,
+            type: "MARKET"
+        })
+    }
+
     private async fetchAssets() {
         const accountInfo = await this.client.accountInfo()
         if (!accountInfo.canTrade) {
@@ -94,16 +134,35 @@ export class Bot {
     }
 
     private async analyzeTradingPairs() {
-        const symbolsPromise = this.client.exchangeInfo().then(it => it.symbols).then(it => it.filter(it => it.status === "TRADING"))
-        const dailyStats = (await this.client.dailyStats()) as DailyStatsResult[]
-        const symbols = (await symbolsPromise).filter(symbol => {
-            const dailyStat = dailyStats.find(it => it.symbol === symbol.symbol)
-            if (dailyStat == null) return false
-            const volumeLimit = new BigNumber(10000)
-            return new BigNumber(dailyStat.quoteVolume).gte(volumeLimit) && new BigNumber(dailyStat.volume).gte(volumeLimit)
-        })
+        let symbols = (await this.client.exchangeInfo()).symbols.filter(it => it.status === "TRADING" && it.isSpotTradingAllowed && it.orderTypes.includes("MARKET"))
+        if (this.tradingPairFilter.enable) {
+            const {blackList, quoteVolumeLimit, volumeLimit, tradeSpeedLimit} = this.tradingPairFilter
+            if (blackList.length !== 0) {
+                symbols = symbols.filter(it => !blackList.includes(it.symbol))
+            }
+            if (quoteVolumeLimit !== 0 || volumeLimit !== 0) {
+                const dailyStats = (await this.client.dailyStats()) as DailyStatsResult[]
+                symbols = symbols.filter(symbol => {
+                    const dailyStat = dailyStats.find(it => it.symbol === symbol.symbol)
+                    if (dailyStat == null) return false
+                    return new BigNumber(dailyStat.quoteVolume).gte(quoteVolumeLimit) && new BigNumber(dailyStat.volume).gte(volumeLimit)
+                })
+            }
+            if (tradeSpeedLimit !== 0) {
+                const tradeSpeedLimitBigNumber = new BigNumber(tradeSpeedLimit)
+                const boolArray = await Promise.all(symbols.map(async symbol => {
+                    const trades = await this.client.trades({symbol: symbol.symbol, limit: 100})
+                    if (trades.length <= 1) return false
+                    const period = new BigNumber(trades[trades.length - 1].time).minus(new BigNumber(trades[0].time)).dividedBy(new BigNumber(100))
+                    const transactionAmount = new BigNumber(trades.length)
+                    const tradeSpeed = transactionAmount.dividedBy(period)
+                    return tradeSpeed.gte(tradeSpeedLimitBigNumber)
+                }))
+                symbols = symbols.filter((_, i) => boolArray[i])
+            }
+        }
 
-        function analyzeNextStep(asset: string) {
+        function analyzeNextStep(asset: string): { asset: string, side: OrderSide }[] {
             return symbols.filter(it => it.baseAsset === asset || it.quoteAsset === asset)
                 .map(it => ({
                     asset: it.baseAsset === asset ? it.quoteAsset : it.baseAsset,
@@ -111,7 +170,7 @@ export class Bot {
                 }))
         }
 
-        const tradingChain = this.chosenQuoteAssets.map(initAsset => ({
+        const tradingChain = this.chosenQuoteAssets.map(it => it.asset).map(initAsset => ({
             asset: initAsset,
             availablePairs: analyzeNextStep(initAsset).map(secondAsset => ({
                 asset: secondAsset.asset,
@@ -148,11 +207,11 @@ export class Bot {
 
 interface TradingChain {
     initAsset: string,
-    firstAction: string,
+    firstAction: OrderSide,
     firstAsset: string,
-    secondAction: string,
+    secondAction: OrderSide,
     secondAsset: string,
-    lastAction: string
+    lastAction: OrderSide
 }
 
 interface ValuableTradingChain extends TradingChain {

@@ -17,6 +17,7 @@ async function main() {
         config.api.apiKey,
         config.api.apiSecret,
         config.quoteAssets,
+        config.tradingPairFilter,
         new BigNumber(config.investmentRatio),
         new BigNumber(config.onlyProfitGreaterEqualThan),
         config.api.httpBase ?? undefined
@@ -25,10 +26,7 @@ async function main() {
     console.log("Bot start")
     console.log("Note that please don't manually perform spot trade while bot running!")
     //running
-    const lucrativeTradingChains = await bot.findOutLucrativeTradingChains()
-    lucrativeTradingChains.slice(0, 10).forEach(it => {
-        console.log(`${it.initAssetQuantity} ${it.initAsset} -> ${it.firstAssetQuantity} ${it.firstAsset} -> ${it.secondAssetQuantity} ${it.secondAsset} -> ${it.finalInitAssetQuantity} ${it.initAsset} profit: ${it.profit.times(new BigNumber(100))}%`)
-    })
+    await bot.performOnce()
 }
 
 main().then(() => {

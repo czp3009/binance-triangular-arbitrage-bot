@@ -7,7 +7,7 @@
   "quoteAssets": ["BTC","ETH","BNB","USDT","BUSD"],
   "investmentRatio": 0.5,
   "onlyProfitGreaterEqualThan": 0.004,
-  "proxy" : {
+  "proxy": {
     "enable": false,
     "http": "http://localhost:10809",
     "https": "http://localhost:10809"

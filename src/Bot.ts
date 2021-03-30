@@ -1,24 +1,22 @@
-import Binance, {DailyStatsResult, OrderSide} from "binance-api-node"
+import Binance, {DailyStatsResult, OrderSide, Symbol} from "binance-api-node"
 import BigNumber from "bignumber.js";
-import {TradingPairFilter} from "./Config";
-import {getPair} from "./Utils";
+import {OrderSetting, TradingPairFilter} from "./Config";
+import {ensureOrderFilled, formatToPercentage, getPair} from "./Utils";
 
 export class Bot {
     private readonly client: import("binance-api-node").Binance
     private readonly quoteAssets: string[]
     private readonly tradingPairFilter: TradingPairFilter
-    private readonly investmentRatio: BigNumber
-    private readonly onlyProfitGreaterEqualThan: BigNumber
+    private readonly orderSetting: OrderSetting
     private initialized: boolean = false
-    private chosenQuoteAssets: { asset: string, quantity: BigNumber }[] = []
-    private availableTradingChains: TradingChain[] = []
+    private candidateSymbols: Symbol[] = []
+    private candidateTradingChains: TradingChain[] = []
 
     constructor(
         apiKey: string, apiSecret: string,
         quoteAssets: string[],
         tradingPairFilter: TradingPairFilter,
-        investmentRatio: BigNumber,
-        onlyProfitGreaterEqualThan: BigNumber,
+        orderSetting: OrderSetting,
         httpBase?: string
     ) {
         this.client = Binance({
@@ -28,34 +26,27 @@ export class Bot {
         })
         this.quoteAssets = quoteAssets
         this.tradingPairFilter = tradingPairFilter
-        this.investmentRatio = investmentRatio
-        this.onlyProfitGreaterEqualThan = onlyProfitGreaterEqualThan
+        this.orderSetting = orderSetting
     }
 
     async init() {
         if (this.initialized) throw new Error("Already initialized")
         console.log("Init...")
-        console.log("Loading assets...")
-        const freeAssets = await this.fetchAssets()
-        if (freeAssets.length === 0) throw new Error("No available asset in your account")
-        console.log("Free assets:")
-        freeAssets.forEach(it => {
-            console.log(`${it.asset}: ${it.quantity}`)
-        })
-        this.chosenQuoteAssets = freeAssets.filter(it => this.quoteAssets.includes(it.asset)).map(it => ({
-            asset: it.asset,
-            quantity: it.quantity
-        }))
-        if (this.chosenQuoteAssets.length === 0) throw new Error("No quote asset is available")
+        console.log("Checking network...")
+        await this.client.ping()
+        console.log("Checking permission...")
+        if (!await this.client.accountInfo().then(it => it.canTrade)) {
+            throw new Error("The currently used API key does not have permission to perform spot trade")
+        }
         console.log("Chosen quote assets:")
-        console.log(this.chosenQuoteAssets.map(it => it.asset).join(", "))
+        console.log(this.quoteAssets.join(", "))
         console.log("Analyze trading pairs...")
-        this.availableTradingChains = await this.analyzeTradingPairs()
-        if (this.availableTradingChains.length === 0) throw new Error("No available trading chain")
-        console.log("Available trading chain:")
-        this.availableTradingChains.forEach(it => {
-            console.log(`${it.initAsset} -> ${it.firstAsset} -> ${it.secondAsset} -> ${it.initAsset}`)
-        })
+        this.candidateSymbols = await this.fetchTradingPairs()
+        this.candidateTradingChains = await this.analyzeTradingPairs()
+        if (this.candidateTradingChains.length === 0) {
+            throw new Error("No candidate trading chain, please change settings and try again")
+        }
+        console.log(`Candidate trading chains: ${this.candidateTradingChains.length}`)
     }
 
     async findOutLucrativeTradingChains(): Promise<ValuableTradingChain[]> {
@@ -72,7 +63,7 @@ export class Bot {
             return side === "BUY" ? quantity.dividedBy(price) : quantity.times(price)
         }
 
-        return this.availableTradingChains.filter(it =>
+        return this.candidateTradingChains.filter(it =>
             !invalidPairs.includes(getPair(it.initAsset, it.firstAsset, it.firstAction)) &&
             !invalidPairs.includes(getPair(it.firstAsset, it.secondAsset, it.secondAction)) &&
             !invalidPairs.includes(getPair(it.secondAsset, it.initAsset, it.lastAction))
@@ -83,84 +74,148 @@ export class Bot {
             const finalInitAssetQuantity = nextQuantity(it.secondAsset, secondAssetQuantity, it.initAsset, it.lastAction)
             const profit = finalInitAssetQuantity.minus(initAssetQuantity).dividedBy(initAssetQuantity)
             return {...it, initAssetQuantity, firstAssetQuantity, secondAssetQuantity, finalInitAssetQuantity, profit}
-        }).sort((a, b) => b.profit.minus(a.profit).toNumber())
+        }).filter(it => it.profit.isPositive())
     }
 
     async performOnce() {
+        //check owned assets
+        console.log("Fetching assets...")
+        const availableAssets = await this.fetchAssets()
+        if (availableAssets.length === 0) {
+            console.log("No available assets in your account")
+            return
+        }
+        console.log("Owned assets:")
+        console.log(availableAssets.map(it => `${it.quantity} ${it.asset}`).join(", "))
+        const chosenQuoteAssets = availableAssets.map(it => it.asset).filter(it => this.quoteAssets.includes(it))
+        if (chosenQuoteAssets.length === 0) {
+            console.log("No quote asset chosen")
+            return
+        }
+        //check trading chains
         const lucrativeTradingChains = await this.findOutLucrativeTradingChains()
         if (lucrativeTradingChains.length === 0) {
             console.log("No lucrative trading chains")
             return
         }
-        lucrativeTradingChains.slice(0, 5).forEach(it => {
-            console.log(`${it.initAssetQuantity} ${it.initAsset} -> ${it.firstAssetQuantity} ${it.firstAsset} -> ${it.secondAssetQuantity} ${it.secondAsset} -> ${it.finalInitAssetQuantity} ${it.initAsset} profit: ${it.profit.times(new BigNumber(100))}%`)
+        console.log(`Lucrative trading chains: ${lucrativeTradingChains.length}`)
+        //TODO check lot size
+        const chosenTradingChains = lucrativeTradingChains.filter(it => chosenQuoteAssets.includes(it.initAsset))
+            .sort((a, b) => b.profit.minus(a.profit).toNumber())
+        if (chosenTradingChains.length === 0) {
+            console.log("No available trading chain")
+            return
+        }
+        console.log("Chosen trading chain(show top 5):")
+        chosenTradingChains.slice(0, 5).forEach(it => {
+            console.log(`${it.initAssetQuantity} ${it.initAsset} -> ${it.firstAssetQuantity} ${it.firstAsset} -> ${it.secondAssetQuantity} ${it.secondAsset} -> ${it.finalInitAssetQuantity} ${it.initAsset} profit: ${formatToPercentage(it.profit)}`)
         })
-        const lucrativeTradingChain = lucrativeTradingChains[0]
-        const {initAsset, firstAction, firstAsset, secondAction, secondAsset, lastAction} = lucrativeTradingChain
-        console.log(`Selected trading chain: ${initAsset} -> ${firstAsset} -> ${secondAsset} -> ${initAsset}`)
-        //send order
-        //first
-        const firstOrder = await this.client.order({
-            symbol: getPair(initAsset, firstAsset, firstAction),
+        const selectedTradingChain = chosenTradingChains[0]
+        if (selectedTradingChain.profit.lte(new BigNumber(this.orderSetting.onlyProfitGreaterEqualThan))) {
+            console.log(`No trading chain profit exceed than ${formatToPercentage(this.orderSetting.onlyProfitGreaterEqualThan)}`)
+            return
+        }
+        const {initAsset, firstAction, firstAsset, secondAction, secondAsset, lastAction, profit} = selectedTradingChain
+        console.log(`Selected trading chain: ${initAsset} -> ${firstAsset} -> ${secondAsset} -> ${initAsset}, expect profit ${formatToPercentage(profit)}`)
+        //start trade
+        if (!this.orderSetting.enable) {
+            console.log("Trading not enabled")
+            return
+        }
+        console.log("Start trade")
+        //step 1
+        console.log(`Step 1(${initAsset} -> ${firstAsset}):`)
+        const stepOneSymbol = getPair(initAsset, firstAsset, firstAction)
+        //TODO change quantity to fit size movement limit
+        const stepOneQuantity = availableAssets.find(it => it.asset === initAsset)!.quantity.times(new BigNumber(this.orderSetting.investmentRatio))
+        console.log(`Init quantity: ${stepOneQuantity}`)
+        const stepOneOrder = await this.client.order({
+            symbol: stepOneSymbol,
             side: firstAction,
-            quantity: this.chosenQuoteAssets.find(it => it.asset === initAsset)!.quantity.toString(),
+            quantity: stepOneQuantity.toString(),
             type: "MARKET"
         })
-        //second
-        const secondOrder = await this.client.order({
-            symbol: getPair(firstAsset, secondAsset, secondAction),
+        ensureOrderFilled(stepOneOrder)
+        const stepTwoQuantity = new BigNumber(stepOneOrder.cummulativeQuoteQty)
+        console.log(`${stepOneQuantity} ${initAsset} -> ${stepTwoQuantity} ${firstAsset}`)
+        //step 2
+        console.log(`Step 2(${firstAsset} -> ${secondAsset})`)
+        const stepTwoSymbol = getPair(firstAsset, secondAsset, secondAction)
+        const stepTwoOrder = await this.client.order({
+            symbol: stepTwoSymbol,
             side: secondAction,
-            quantity: firstOrder.cummulativeQuoteQty,
+            quantity: stepTwoQuantity.toString(),
             type: "MARKET"
         })
-        //third
-        const thirdOrder = await this.client.order({
-            symbol: getPair(secondAsset, initAsset, lastAction),
+        ensureOrderFilled(stepTwoOrder)
+        const stepThreeQuantity = new BigNumber(stepTwoOrder.cummulativeQuoteQty)
+        console.log(`${stepTwoQuantity} ${firstAsset} -> ${stepThreeQuantity} ${secondAsset}`)
+        //step 3
+        console.log(`Step 2(${secondAsset} -> ${initAsset})`)
+        const stepThreeSymbol = getPair(secondAsset, initAsset, lastAction)
+        const stepThreeOrder = await this.client.order({
+            symbol: stepThreeSymbol,
             side: lastAction,
-            quantity: secondOrder.cummulativeQuoteQty,
+            quantity: stepThreeQuantity.toString(),
             type: "MARKET"
         })
+        ensureOrderFilled(stepThreeOrder)
+        const finalQuantity = new BigNumber(stepThreeOrder.cummulativeQuoteQty)
+        console.log(`${stepThreeQuantity} ${secondAsset} -> ${finalQuantity} ${initAsset}`)
+        //summary
+        console.log(`Summary: ${initAsset} ${stepOneQuantity} -> ${finalQuantity}`)
+        const actualProfit = finalQuantity.minus(stepOneQuantity).dividedBy(stepOneQuantity)
+        console.log(`Actual profit: ${formatToPercentage(actualProfit)}`)
     }
 
     private async fetchAssets() {
         const accountInfo = await this.client.accountInfo()
-        if (!accountInfo.canTrade) {
-            throw new Error("The currently used API key does not have permission to perform spot trade")
-        }
         return accountInfo.balances.map(it => ({
             asset: it.asset,
             quantity: new BigNumber(it.free)
         })).filter(it => it.quantity.gt(new BigNumber(0)))
     }
 
-    private async analyzeTradingPairs() {
-        let symbols = (await this.client.exchangeInfo()).symbols.filter(it => it.status === "TRADING" && it.isSpotTradingAllowed && it.orderTypes.includes("MARKET"))
+    private async fetchTradingPairs() {
+        const client = this.client
+        const exchangeInfo = await client.exchangeInfo()
+        let symbols = exchangeInfo.symbols.filter(it => it.status === "TRADING" && it.isSpotTradingAllowed && it.orderTypes.includes("MARKET"))
         if (this.tradingPairFilter.enable) {
-            const {blackList, quoteVolumeLimit, volumeLimit, tradeSpeedLimit} = this.tradingPairFilter
+            const {blackList, quoteVolumeLimit, volumeLimit, tradeCountLimit} = this.tradingPairFilter
             if (blackList.length !== 0) {
                 symbols = symbols.filter(it => !blackList.includes(it.symbol))
             }
+            let cachedDailyStats: DailyStatsResult[]
+
+            async function getDailyStats() {
+                if (cachedDailyStats == null) {
+                    cachedDailyStats = await client.dailyStats() as DailyStatsResult[]
+                }
+                return cachedDailyStats
+            }
+
             if (quoteVolumeLimit !== 0 || volumeLimit !== 0) {
-                const dailyStats = (await this.client.dailyStats()) as DailyStatsResult[]
+                const dailyStats = await getDailyStats()
                 symbols = symbols.filter(symbol => {
                     const dailyStat = dailyStats.find(it => it.symbol === symbol.symbol)
                     if (dailyStat == null) return false
                     return new BigNumber(dailyStat.quoteVolume).gte(quoteVolumeLimit) && new BigNumber(dailyStat.volume).gte(volumeLimit)
                 })
             }
-            if (tradeSpeedLimit !== 0) {
-                const tradeSpeedLimitBigNumber = new BigNumber(tradeSpeedLimit)
-                const boolArray = await Promise.all(symbols.map(async symbol => {
-                    const trades = await this.client.trades({symbol: symbol.symbol, limit: 100})
-                    if (trades.length <= 1) return false
-                    const period = new BigNumber(trades[trades.length - 1].time).minus(new BigNumber(trades[0].time)).dividedBy(new BigNumber(100))
-                    const transactionAmount = new BigNumber(trades.length)
-                    const tradeSpeed = transactionAmount.dividedBy(period)
-                    return tradeSpeed.gte(tradeSpeedLimitBigNumber)
-                }))
-                symbols = symbols.filter((_, i) => boolArray[i])
+            if (tradeCountLimit !== 0) {
+                const dailyStats = await getDailyStats()
+                symbols = symbols.filter(symbol => {
+                    const dailyStat = dailyStats.find(it => it.symbol === symbol.symbol)
+                    if (dailyStat == null) return false
+                    return new BigNumber(dailyStat.count).gte(tradeCountLimit)
+                })
             }
         }
+        return symbols
+    }
+
+    private async analyzeTradingPairs() {
+        const symbols = this.candidateSymbols
 
         function analyzeNextStep(asset: string): { asset: string, side: OrderSide }[] {
             return symbols.filter(it => it.baseAsset === asset || it.quoteAsset === asset)
@@ -170,7 +225,7 @@ export class Bot {
                 }))
         }
 
-        const tradingChain = this.chosenQuoteAssets.map(it => it.asset).map(initAsset => ({
+        const tradingChain = this.quoteAssets.map(initAsset => ({
             asset: initAsset,
             availablePairs: analyzeNextStep(initAsset).map(secondAsset => ({
                 asset: secondAsset.asset,
@@ -182,13 +237,13 @@ export class Bot {
                 }))
             }))
         }))
-        const availableTradingChains: TradingChain[] = []
+        const candidateTradingChains: TradingChain[] = []
         tradingChain.forEach(init => {
             init.availablePairs.forEach(first => {
                 first.availablePairs.forEach(second => {
                     second.availablePairs.forEach(third => {
                         if (third.asset === init.asset) {
-                            availableTradingChains.push({
+                            candidateTradingChains.push({
                                 initAsset: init.asset,
                                 firstAction: first.side,
                                 firstAsset: first.asset,
@@ -201,7 +256,7 @@ export class Bot {
                 })
             })
         })
-        return availableTradingChains
+        return candidateTradingChains
     }
 }
 

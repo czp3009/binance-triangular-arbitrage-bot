@@ -11,6 +11,7 @@
   "dependencies": {
     "bignumber.js": "^9.0.1",
     "binance-api-node": "^0.10.34",
+    "delay": "^5.0.0",
     "node-global-proxy": "^1.0.1"
   },
   "devDependencies": {

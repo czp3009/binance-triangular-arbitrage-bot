@@ -1,7 +1,7 @@
 import proxy from "node-global-proxy"
 import config from "../config/config.json"
 import {Bot} from "./Bot";
-import BigNumber from "bignumber.js";
+import delay from "delay";
 
 async function main() {
     //proxy
@@ -18,15 +18,20 @@ async function main() {
         config.api.apiSecret,
         config.quoteAssets,
         config.tradingPairFilter,
-        new BigNumber(config.investmentRatio),
-        new BigNumber(config.onlyProfitGreaterEqualThan),
+        config.order,
         config.api.httpBase ?? undefined
     )
     await bot.init()
     console.log("Bot start")
-    console.log("Note that please don't manually perform spot trade while bot running!")
+    console.log("Note that please don't manually do spot trade while bot running!")
     //running
-    await bot.performOnce()
+    while (true) {
+        console.log("=".repeat(50))
+        console.log(`Time: ${new Date()}`)
+        await bot.performOnce()
+        console.log("=".repeat(50))
+        await delay(config.order.interval)
+    }
 }
 
 main().then(() => {

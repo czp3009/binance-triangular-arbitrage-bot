@@ -3,5 +3,12 @@ export interface TradingPairFilter {
     blackList: string[],
     quoteVolumeLimit: number,
     volumeLimit: number,
-    tradeSpeedLimit: number
+    tradeCountLimit: number
+}
+
+export interface OrderSetting {
+    enable: boolean
+    interval: number,
+    investmentRatio: number
+    onlyProfitGreaterEqualThan: number
 }

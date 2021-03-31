@@ -14,9 +14,17 @@ export interface TradingChain {
 }
 
 export interface ValuableTradingChain extends TradingChain {
-    initAssetQuantity: BigNumber,
-    firstAssetQuantity: BigNumber,
-    secondAssetQuantity: BigNumber,
-    finalInitAssetQuantity: BigNumber,
+    minInitAsset: BigNumber,
+    stepOneLeftQuantity: BigNumber,
+    stepOneAvailableLeftDecimalPlaces: number
+    stepOneRightQuantity: BigNumber,
+    firstAssetRemain: BigNumber,
+    stepTwoLeftQuantity: BigNumber,
+    stepTwoAvailableLeftDecimalPlaces: number,
+    stepTwoRightQuantity: BigNumber,
+    secondAssetRemain: BigNumber,
+    stepThreeLeftQuantity: BigNumber,
+    stepThreeAvailableLeftDecimalPlaces: number,
+    stepThreeRightQuantity: BigNumber,
     profit: BigNumber
 }

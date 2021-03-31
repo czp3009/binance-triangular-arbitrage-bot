@@ -6,7 +6,7 @@
   },
   "quoteAssets": ["BTC", "ETH", "BNB"],
   "tradingPairFilter": {
-    "enable": true,
+    "enable": false,
     "blackList": [],
     "quoteVolumeLimit": 1000,
     "volumeLimit": 1000,
@@ -14,10 +14,10 @@
   },
   "order": {
     "enable": false,
-    "interval": 10000,
+    "interval": 5000,
     "useBestInitQuantity": true,
     "maxInvestmentRatio": 0.1,
-    "onlyProfitGreaterEqualThan": 0.006
+    "onlyProfitGreaterEqualThan": 0.0035
   },
   "proxy": {
     "enable": false,

@@ -1,4 +1,13 @@
-import Binance, {DailyStatsResult, OrderSide, Symbol, SymbolLotSizeFilter, SymbolPriceFilter} from "binance-api-node"
+import Binance, {
+    DailyStatsResult,
+    NewOrder,
+    Order,
+    OrderSide,
+    Symbol,
+    SymbolLotSizeFilter,
+    SymbolMinNotionalFilter,
+    SymbolPriceFilter
+} from "binance-api-node"
 import BigNumber from "bignumber.js";
 import {OrderSetting, TradingPairFilter} from "./Config";
 import {ensureOrderFilled, formatToPercentage, toPair} from "./Utils";
@@ -116,42 +125,65 @@ export class Bot {
         chosenInitAssetQuantity = chosenInitAssetQuantity.decimalPlaces(stepOneAvailableLeftDecimalPlaces, 1)
         if (chosenInitAssetQuantity.lt(selectedTradingChain.minInitAsset)) {
             console.log(`Only ${chosenInitAssetQuantity} ${initAsset} can be used, not meet min price limit ${selectedTradingChain.minInitAsset}`)
+            return
         }
         console.log("Start trade")
         console.log(`Chosen init asset quantity: ${chosenInitAssetQuantity}`)
+
+        function generateNewOrder(symbol: string, side: string, quantity: BigNumber) {
+            const newOrder = {
+                symbol,
+                side,
+                type: "MARKET"
+            } as NewOrder
+            if (side === "SELL") {
+                newOrder.quantity = quantity.toString()
+            } else {
+                newOrder.quoteOrderQty = quantity.toString()
+            }
+            return newOrder
+        }
+
+        function nextQuantity(order: Order) {
+            return order.side === "SELL" ? order.cummulativeQuoteQty : order.executedQty
+        }
+
         //step 1
         console.log(`Step 1(${initAsset} -> ${firstAsset}):`)
-        const stepOneOrder = await this.client.order({
-            symbol: stepOneSymbol,
-            side: firstAction,
-            quantity: chosenInitAssetQuantity.toString(),
-            type: "MARKET"
-        })
+        const stepOneNewOrder = generateNewOrder(stepOneSymbol, firstAction, chosenInitAssetQuantity)
+        console.log("Request:")
+        console.log(stepOneNewOrder)
+        const stepOneOrder = await this.client.order(stepOneNewOrder)
+        console.log("Response:")
+        console.log(stepOneOrder)
         ensureOrderFilled(stepOneOrder)
-        const actualStepTwoLeftQuantity = new BigNumber(stepOneOrder.cummulativeQuoteQty).decimalPlaces(stepTwoAvailableLeftDecimalPlaces, 1)
+        const actualStepTwoLeftQuantity = new BigNumber(nextQuantity(stepOneOrder)).decimalPlaces(stepTwoAvailableLeftDecimalPlaces, 1)
         console.log(`${chosenInitAssetQuantity} ${initAsset} -> ${actualStepTwoLeftQuantity} ${firstAsset}`)
+
         //step 2
         console.log(`Step 2(${firstAsset} -> ${secondAsset})`)
-        const stepTwoOrder = await this.client.order({
-            symbol: stepTwoSymbol,
-            side: secondAction,
-            quantity: actualStepTwoLeftQuantity.toString(),
-            type: "MARKET"
-        })
+        const stepTwoNewOrder = generateNewOrder(stepTwoSymbol, secondAction, actualStepTwoLeftQuantity)
+        console.log("Request:")
+        console.log(stepTwoNewOrder)
+        const stepTwoOrder = await this.client.order(stepTwoNewOrder)
+        console.log("Response:")
+        console.log(stepTwoOrder)
         ensureOrderFilled(stepTwoOrder)
-        const actualStepThreeLeftQuantity = new BigNumber(stepTwoOrder.cummulativeQuoteQty).decimalPlaces(stepThreeAvailableLeftDecimalPlaces, 1)
+        const actualStepThreeLeftQuantity = new BigNumber(nextQuantity(stepTwoOrder)).decimalPlaces(stepThreeAvailableLeftDecimalPlaces, 1)
         console.log(`${actualStepTwoLeftQuantity} ${firstAsset} -> ${actualStepThreeLeftQuantity} ${secondAsset}`)
+
         //step 3
-        console.log(`Step 2(${secondAsset} -> ${initAsset})`)
-        const stepThreeOrder = await this.client.order({
-            symbol: stepThreeSymbol,
-            side: lastAction,
-            quantity: actualStepThreeLeftQuantity.toString(),
-            type: "MARKET"
-        })
+        console.log(`Step 3(${secondAsset} -> ${initAsset})`)
+        const stepThreeNewOrder = generateNewOrder(stepThreeSymbol, lastAction, actualStepThreeLeftQuantity)
+        console.log("Request:")
+        console.log(stepThreeNewOrder)
+        const stepThreeOrder = await this.client.order(stepThreeNewOrder)
+        console.log("Response:")
+        console.log(stepThreeOrder)
         ensureOrderFilled(stepThreeOrder)
-        const actualFinalQuantity = new BigNumber(stepThreeOrder.cummulativeQuoteQty)
+        const actualFinalQuantity = new BigNumber(nextQuantity(stepThreeOrder))
         console.log(`${actualStepThreeLeftQuantity} ${secondAsset} -> ${actualFinalQuantity} ${initAsset}`)
+
         //summary
         console.log(`Summary: ${initAsset} ${chosenInitAssetQuantity} -> ${actualFinalQuantity}`)
         const actualProfit = actualFinalQuantity.minus(chosenInitAssetQuantity).dividedBy(chosenInitAssetQuantity)
@@ -275,6 +307,7 @@ export class Bot {
             const filters = symbolMap.get(symbol)!.filters
             const priceFilter = filters.find(it => it.filterType === "PRICE_FILTER") as SymbolPriceFilter
             const lotSizeFilter = filters.find(it => it.filterType === "LOT_SIZE") as SymbolLotSizeFilter
+            const minNotionalFilter = filters.find(it => it.filterType === "MIN_NOTIONAL") as SymbolMinNotionalFilter
             if (side === "BUY") {
                 const askPrice = new BigNumber(ticker.askPrice)
                 return {
@@ -283,7 +316,7 @@ export class Bot {
                     right: new BigNumber(ticker.askQty),
                     exchangeRate: new BigNumber(1).dividedBy(askPrice),
                     availableLeftDecimalPlaces: new BigNumber(priceFilter.tickSize).dp(),
-                    minLeft: new BigNumber(priceFilter.minPrice),
+                    minLeft: BigNumber.max(new BigNumber(priceFilter.minPrice), new BigNumber(minNotionalFilter.minNotional)),
                     minRight: new BigNumber(lotSizeFilter.minQty)
                 }
             } else {
@@ -295,7 +328,7 @@ export class Bot {
                     exchangeRate: new BigNumber(bidPrice),
                     availableLeftDecimalPlaces: new BigNumber(lotSizeFilter.stepSize).dp(),
                     minLeft: new BigNumber(lotSizeFilter.minQty),
-                    minRight: new BigNumber(priceFilter.minPrice)
+                    minRight: BigNumber.max(new BigNumber(priceFilter.minPrice), new BigNumber(minNotionalFilter.minNotional))
                 }
             }
         }

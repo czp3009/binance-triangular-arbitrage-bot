@@ -1,7 +1,8 @@
 import Binance, {DailyStatsResult, OrderSide, Symbol} from "binance-api-node"
 import BigNumber from "bignumber.js";
 import {OrderSetting, TradingPairFilter} from "./Config";
-import {ensureOrderFilled, formatToPercentage, getPair} from "./Utils";
+import {ensureOrderFilled, formatToPercentage, toPair} from "./Utils";
+import {TradingChain, ValuableTradingChain} from "./TradingChain";
 
 export class Bot {
     private readonly client: import("binance-api-node").Binance
@@ -50,28 +51,18 @@ export class Bot {
     }
 
     async findOutLucrativeTradingChains(): Promise<ValuableTradingChain[]> {
-        //some price will be 0 on testnet
-        const prices = await this.client.prices()
-        const invalidPairs = Object.keys(prices).filter(it => new BigNumber(prices[it]).eq(new BigNumber(0)))
+        const allBookTickers = await this.client.allBookTickers()
 
-        function getPrice(asset: string, otherAsset: string, side: string) {
-            return new BigNumber(prices[getPair(asset, otherAsset, side)])
+        function nextQuantity(symbol: string, quantity: BigNumber, side: string) {
+            const ticker = allBookTickers[symbol]
+            return side === "BUY" ? quantity.dividedBy(new BigNumber(ticker.bestAsk)) : quantity.times(new BigNumber(ticker.bestBid))
         }
 
-        function nextQuantity(asset: string, quantity: BigNumber, nextAsset: string, side: string) {
-            const price = getPrice(asset, nextAsset, side)
-            return side === "BUY" ? quantity.dividedBy(price) : quantity.times(price)
-        }
-
-        return this.candidateTradingChains.filter(it =>
-            !invalidPairs.includes(getPair(it.initAsset, it.firstAsset, it.firstAction)) &&
-            !invalidPairs.includes(getPair(it.firstAsset, it.secondAsset, it.secondAction)) &&
-            !invalidPairs.includes(getPair(it.secondAsset, it.initAsset, it.lastAction))
-        ).map(it => {
+        return this.candidateTradingChains.map(it => {
             const initAssetQuantity = new BigNumber(1)
-            const firstAssetQuantity = nextQuantity(it.initAsset, initAssetQuantity, it.firstAsset, it.firstAction)
-            const secondAssetQuantity = nextQuantity(it.firstAsset, firstAssetQuantity, it.secondAsset, it.secondAction)
-            const finalInitAssetQuantity = nextQuantity(it.secondAsset, secondAssetQuantity, it.initAsset, it.lastAction)
+            const firstAssetQuantity = nextQuantity(it.stepOneSymbol, initAssetQuantity, it.firstAction)
+            const secondAssetQuantity = nextQuantity(it.stepTwoSymbol, firstAssetQuantity, it.secondAction)
+            const finalInitAssetQuantity = nextQuantity(it.stepThreeSymbol, secondAssetQuantity, it.lastAction)
             const profit = finalInitAssetQuantity.minus(initAssetQuantity).dividedBy(initAssetQuantity)
             return {...it, initAssetQuantity, firstAssetQuantity, secondAssetQuantity, finalInitAssetQuantity, profit}
         }).filter(it => it.profit.isPositive())
@@ -125,9 +116,9 @@ export class Bot {
         console.log("Start trade")
         //step 1
         console.log(`Step 1(${initAsset} -> ${firstAsset}):`)
-        const stepOneSymbol = getPair(initAsset, firstAsset, firstAction)
+        const stepOneSymbol = toPair(initAsset, firstAsset, firstAction)
         //TODO change quantity to fit size movement limit
-        const stepOneQuantity = availableAssets.find(it => it.asset === initAsset)!.quantity.times(new BigNumber(this.orderSetting.investmentRatio))
+        const stepOneQuantity = availableAssets.find(it => it.asset === initAsset)!.quantity.times(new BigNumber(this.orderSetting.maxInvestmentRatio))
         console.log(`Init quantity: ${stepOneQuantity}`)
         const stepOneOrder = await this.client.order({
             symbol: stepOneSymbol,
@@ -140,7 +131,7 @@ export class Bot {
         console.log(`${stepOneQuantity} ${initAsset} -> ${stepTwoQuantity} ${firstAsset}`)
         //step 2
         console.log(`Step 2(${firstAsset} -> ${secondAsset})`)
-        const stepTwoSymbol = getPair(firstAsset, secondAsset, secondAction)
+        const stepTwoSymbol = toPair(firstAsset, secondAsset, secondAction)
         const stepTwoOrder = await this.client.order({
             symbol: stepTwoSymbol,
             side: secondAction,
@@ -152,7 +143,7 @@ export class Bot {
         console.log(`${stepTwoQuantity} ${firstAsset} -> ${stepThreeQuantity} ${secondAsset}`)
         //step 3
         console.log(`Step 2(${secondAsset} -> ${initAsset})`)
-        const stepThreeSymbol = getPair(secondAsset, initAsset, lastAction)
+        const stepThreeSymbol = toPair(secondAsset, initAsset, lastAction)
         const stepThreeOrder = await this.client.order({
             symbol: stepThreeSymbol,
             side: lastAction,
@@ -247,9 +238,12 @@ export class Bot {
                                 initAsset: init.asset,
                                 firstAction: first.side,
                                 firstAsset: first.asset,
+                                stepOneSymbol: toPair(init.asset, first.asset, first.side),
                                 secondAction: second.side,
                                 secondAsset: second.asset,
-                                lastAction: third.side
+                                stepTwoSymbol: toPair(first.asset, second.asset, second.side),
+                                lastAction: third.side,
+                                stepThreeSymbol: toPair(second.asset, init.asset, third.side)
                             })
                         }
                     })
@@ -258,21 +252,4 @@ export class Bot {
         })
         return candidateTradingChains
     }
-}
-
-interface TradingChain {
-    initAsset: string,
-    firstAction: OrderSide,
-    firstAsset: string,
-    secondAction: OrderSide,
-    secondAsset: string,
-    lastAction: OrderSide
-}
-
-interface ValuableTradingChain extends TradingChain {
-    initAssetQuantity: BigNumber,
-    firstAssetQuantity: BigNumber,
-    secondAssetQuantity: BigNumber,
-    finalInitAssetQuantity: BigNumber,
-    profit: BigNumber
 }

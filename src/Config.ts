@@ -1,14 +1,15 @@
 export interface TradingPairFilter {
     enable: boolean
-    blackList: string[],
-    quoteVolumeLimit: number,
-    volumeLimit: number,
+    blackList: string[]
+    quoteVolumeLimit: number
+    volumeLimit: number
     tradeCountLimit: number
 }
 
 export interface OrderSetting {
     enable: boolean
-    interval: number,
-    investmentRatio: number
+    interval: number
+    useBestInitQuantity: boolean
+    maxInvestmentRatio: number
     onlyProfitGreaterEqualThan: number
 }

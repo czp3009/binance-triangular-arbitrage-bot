@@ -15,7 +15,8 @@
   "order": {
     "enable": false,
     "interval": 10000,
-    "investmentRatio": 0.1,
+    "useBestInitQuantity": true,
+    "maxInvestmentRatio": 0.1,
     "onlyProfitGreaterEqualThan": 0.006
   },
   "proxy": {
